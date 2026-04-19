@@ -1,4 +1,25 @@
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
+const API_URL =
+  (import.meta as unknown as { env?: { VITE_API_URL?: string } }).env?.VITE_API_URL ||
+  'http://localhost:3001';
+
+async function fetchWithTimeout(url: string, opts: RequestInit = {}, ms = 3000): Promise<Response> {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), ms);
+  try {
+    return await fetch(url, { ...opts, signal: ctrl.signal });
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+export async function isApiAvailable(): Promise<boolean> {
+  try {
+    const r = await fetchWithTimeout(`${API_URL}/api/health`, {}, 1500);
+    return r.ok;
+  } catch {
+    return false;
+  }
+}
 
 export interface HourlyLog {
   id: string;
@@ -25,7 +46,7 @@ export interface DailyLog {
 
 // Fetch hourly logs from Google Sheets
 export async function fetchHourlyLogs(): Promise<HourlyLog[]> {
-  const response = await fetch(`${API_URL}/api/hourly`);
+  const response = await fetchWithTimeout(`${API_URL}/api/hourly`);
   if (!response.ok) throw new Error('Failed to fetch hourly logs');
   const data = await response.json();
   return data.map((log: any) => ({
@@ -57,7 +78,7 @@ export async function saveHourlyLog(log: Omit<HourlyLog, 'id'>): Promise<void> {
 
 // Fetch daily logs from Google Sheets
 export async function fetchDailyLogs(): Promise<DailyLog[]> {
-  const response = await fetch(`${API_URL}/api/daily`);
+  const response = await fetchWithTimeout(`${API_URL}/api/daily`);
   if (!response.ok) throw new Error('Failed to fetch daily logs');
   const data = await response.json();
   return data.map((log: any) => ({
