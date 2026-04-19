@@ -1,4 +1,4 @@
-import { fetchHourlyLogs, saveHourlyLog, fetchDailyLogs, saveDailyLog } from './services/api';
+import { fetchHourlyLogs, saveHourlyLog, fetchDailyLogs, saveDailyLog, isApiAvailable } from './services/api';
 import React, { useState, useEffect, useMemo } from 'react';
 import { Server, Download, Upload, Plus, TrendingUp, Calendar, HelpCircle } from 'lucide-react';
 import { format } from 'date-fns';
@@ -8,7 +8,11 @@ import TrendChart from './components/TrendChart';
 import FiveDaySummary from './components/FiveDaySummary';
 import LogReadingModal from './components/LogReadingModal';
 import { HelpModal } from './components/HelpModal';
+import AlertBanner from './components/AlertBanner';
 import { HourlyLog, DailyLog, calculateHourlyPUE } from './types';
+import { parseCSV, fetchAndParseCSV } from './utils/csvParser';
+import { detectAlerts } from './utils/alerts';
+import { loadHourly, loadDaily, saveHourly, saveDaily } from './utils/storage';
 
 const HALLS = ['A', 'B', 'C', 'D', 'E'];
 
@@ -19,25 +23,52 @@ function App() {
   const [currentTime, setCurrentTime] = useState(new Date());
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isHelpOpen, setIsHelpOpen] = useState(false);
-  const [activeTab, setActiveTab] = useState<'hourly' | 'daily' | 'summary'>('hourly');
+  const [activeTab, setActiveTab] = useState<'hourly' | 'summary'>('hourly');
 
-  // Load data from Google Sheets on mount
+  // Load data: API → localStorage → bundled sample CSVs (cold start)
   useEffect(() => {
     const loadData = async () => {
+      // 1. Try backend
+      if (await isApiAvailable()) {
+        try {
+          const [hourly, daily] = await Promise.all([fetchHourlyLogs(), fetchDailyLogs()]);
+          if (hourly.length || daily.length) {
+            setHourlyLogs(hourly);
+            setDailyLogs(daily);
+            return;
+          }
+        } catch (error) {
+          console.warn('API reachable but fetch failed:', error);
+        }
+      }
+
+      // 2. Try localStorage
+      const cachedHourly = loadHourly();
+      const cachedDaily = loadDaily();
+      if (cachedHourly.length || cachedDaily.length) {
+        setHourlyLogs(cachedHourly);
+        setDailyLogs(cachedDaily);
+        return;
+      }
+
+      // 3. Fall back to bundled sample data sheets
       try {
-        const [hourly, daily] = await Promise.all([
-          fetchHourlyLogs(),
-          fetchDailyLogs(),
+        const [h, d] = await Promise.all([
+          fetchAndParseCSV('/sample-hourly-data.csv'),
+          fetchAndParseCSV('/sample-daily-data.csv'),
         ]);
-        setHourlyLogs(hourly);
-        setDailyLogs(daily);
+        setHourlyLogs(h.hourly);
+        setDailyLogs(d.daily);
       } catch (error) {
-        console.error('Failed to load data from Google Sheets:', error);
-        // Fallback to localStorage if API fails
+        console.error('Failed to load sample data:', error);
       }
     };
     loadData();
   }, []);
+
+  // Persist to localStorage on every change (offline-safe)
+  useEffect(() => { saveHourly(hourlyLogs); }, [hourlyLogs]);
+  useEffect(() => { saveDaily(dailyLogs); }, [dailyLogs]);
 
   // Update clock every second
   useEffect(() => {
@@ -84,39 +115,36 @@ function App() {
   }, [hourlyLogs]);
 
   // Add hourly log
-  const addHourlyLog = async (log: Omit<HourlyLog, 'id'>) => {
+  const addHourlyLog = async (log: Omit<HourlyLog, 'id' | 'timestamp'>) => {
+    // Build a timestamp anchored to today + the selected hour.
+    const now = new Date();
+    const [hh] = log.hour.split(':');
+    const timestamp = new Date(now.getFullYear(), now.getMonth(), now.getDate(), parseInt(hh, 10), 0, 0);
+
     const newLog: HourlyLog = {
       ...log,
-      id: Date.now().toString(),
-      timestamp: new Date(),
+      id: `${log.hall}-${log.hour}-${timestamp.toISOString()}`,
+      timestamp,
     };
-  
-    // Save to Google Sheets
+
+    setHourlyLogs(prev => [...prev, newLog]);
+
     try {
       await saveHourlyLog(newLog);
-      setHourlyLogs(prev => [...prev, newLog]);
     } catch (error) {
       console.error('Failed to save to Google Sheets:', error);
-      alert('Failed to sync with Google Sheets. Data saved locally only.');
-      setHourlyLogs(prev => [...prev, newLog]);
+      // Silent fallback — data is already persisted to state + localStorage.
     }
   };
 
   // Add daily log
   const addDailyLog = async (log: Omit<DailyLog, 'id'>) => {
-    const newLog: DailyLog = {
-      ...log,
-      id: Date.now().toString(),
-    };
-  
-    // Save to Google Sheets
+    const newLog: DailyLog = { ...log, id: log.date.toISOString().split('T')[0] };
+    setDailyLogs(prev => [...prev.filter(d => d.id !== newLog.id), newLog]);
     try {
       await saveDailyLog(newLog);
-      setDailyLogs(prev => [...prev, newLog]);
     } catch (error) {
       console.error('Failed to save to Google Sheets:', error);
-      alert('Failed to sync with Google Sheets. Data saved locally only.');
-      setDailyLogs(prev => [...prev, newLog]);
     }
   };
 
@@ -156,7 +184,7 @@ function App() {
     URL.revokeObjectURL(url);
   };
 
-  // Import CSV
+  // Import CSV — supports exported multi-section and sample single-section formats
   const importCSV = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -164,67 +192,20 @@ function App() {
     const reader = new FileReader();
     reader.onload = (e) => {
       const text = e.target?.result as string;
-      const lines = text.split('\n').map(line => line.trim()).filter(Boolean);
-
-      let i = 0;
-      const newHourlyLogs: HourlyLog[] = [];
-      const newDailyLogs: DailyLog[] = [];
-
-      while (i < lines.length) {
-        const line = lines[i];
-        
-        if (line === 'HOURLY LOGS') {
-          i += 2; // Skip header
-          while (i < lines.length && lines[i] !== 'DAILY LOGS') {
-            const parts = lines[i].split(',');
-            if (parts.length >= 7) {
-              newHourlyLogs.push({
-                id: Date.now().toString() + Math.random(),
-                timestamp: new Date(parts[0]),
-                hall: parts[1],
-                hour: parts[2],
-                temperature: parseFloat(parts[3]),
-                humidity: parseFloat(parts[4]),
-                itLoad: parseFloat(parts[5]),
-                totalPower: parseFloat(parts[6])
-              });
-            }
-            i++;
-          }
-        } else if (line === 'DAILY LOGS') {
-          i += 2; // Skip header
-          while (i < lines.length) {
-            const parts = lines[i].split(',');
-            if (parts.length >= 7) {
-              newDailyLogs.push({
-                id: Date.now().toString() + Math.random(),
-                date: new Date(parts[0]),
-                totalUtility: parseFloat(parts[1]),
-                cooling: parseFloat(parts[2]),
-                it: parseFloat(parts[3]),
-                others: parseFloat(parts[4]),
-                supsLoss: parseFloat(parts[5]),
-                txLoss: parseFloat(parts[6]),
-                pue: parseFloat(parts[7])
-              });
-            }
-            i++;
-          }
-        } else {
-          i++;
-        }
+      const { hourly, daily } = parseCSV(text);
+      if (hourly.length === 0 && daily.length === 0) {
+        alert('No recognisable rows found in that CSV.');
+        return;
       }
-
-      if (newHourlyLogs.length > 0) {
-        setHourlyLogs(prev => [...prev, ...newHourlyLogs]);
-      }
-      if (newDailyLogs.length > 0) {
-        setDailyLogs(prev => [...prev, ...newDailyLogs]);
-      }
+      if (hourly.length > 0) setHourlyLogs(prev => [...prev, ...hourly]);
+      if (daily.length > 0) setDailyLogs(prev => [...prev, ...daily]);
     };
     reader.readAsText(file);
     event.target.value = '';
   };
+
+  // Real-time alerts derived from the latest reading per hall
+  const alerts = useMemo(() => detectAlerts(hourlyLogs), [hourlyLogs]);
 
   const getPUEColor = (pue: number) => {
     if (pue === 0) return 'text-gray-400';
@@ -328,6 +309,9 @@ function App() {
 
       {/* Main Content */}
       <main className="max-w-[1800px] mx-auto px-6 py-6 space-y-6">
+        {/* Real-time Alerts */}
+        <AlertBanner alerts={alerts} />
+
         {/* Hall Cards */}
         <div className="grid grid-cols-5 gap-4">
           {hallData.map(data => (
@@ -344,24 +328,12 @@ function App() {
           ))}
         </div>
 
-        {/* Facility PUE + Trend Chart */}
-        <div className="grid grid-cols-3 gap-6">
-          <div className="col-span-1">
-            <FacilityPUE hallData={hallData} facilityPUE={kpis.avgPUE} />
-          </div>
-          <div className="col-span-2">
-            <TrendChart hourlyLogs={hourlyLogs} activeHall={activeHall} />
-          </div>
-        </div>
-
         {/* Tabs */}
         <div className="flex gap-2 border-b border-slate-800">
           <button
             onClick={() => setActiveTab('hourly')}
             className={`px-6 py-3 font-medium transition-all relative ${
-              activeTab === 'hourly'
-                ? 'text-cyan-400'
-                : 'text-slate-400 hover:text-white'
+              activeTab === 'hourly' ? 'text-cyan-400' : 'text-slate-400 hover:text-white'
             }`}
           >
             <TrendingUp className="w-4 h-4 inline mr-2" />
@@ -373,9 +345,7 @@ function App() {
           <button
             onClick={() => setActiveTab('summary')}
             className={`px-6 py-3 font-medium transition-all relative ${
-              activeTab === 'summary'
-                ? 'text-cyan-400'
-                : 'text-slate-400 hover:text-white'
+              activeTab === 'summary' ? 'text-cyan-400' : 'text-slate-400 hover:text-white'
             }`}
           >
             <Calendar className="w-4 h-4 inline mr-2" />
@@ -386,8 +356,18 @@ function App() {
           </button>
         </div>
 
-        {/* Tab Content */}
-        {activeTab === 'summary' && <FiveDaySummary dailyLogs={dailyLogs} />}
+        {/* Tab Content: Facility PUE paired with active view */}
+        <div className="grid grid-cols-3 gap-6">
+          <div className="col-span-1">
+            <FacilityPUE hallData={hallData} facilityPUE={kpis.avgPUE} />
+          </div>
+          <div className="col-span-2">
+            {activeTab === 'hourly' && (
+              <TrendChart hourlyLogs={hourlyLogs} activeHall={activeHall} />
+            )}
+            {activeTab === 'summary' && <FiveDaySummary dailyLogs={dailyLogs} />}
+          </div>
+        </div>
       </main>
 
       {/* Log Reading Modal */}
