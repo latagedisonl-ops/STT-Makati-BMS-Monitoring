@@ -1,3 +1,4 @@
+import { fetchHourlyLogs, saveHourlyLog, fetchDailyLogs, saveDailyLog } from './services/api';
 import React, { useState, useEffect, useMemo } from 'react';
 import { Server, Download, Upload, Plus, TrendingUp, Calendar, HelpCircle } from 'lucide-react';
 import { format } from 'date-fns';
@@ -19,6 +20,24 @@ function App() {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isHelpOpen, setIsHelpOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<'hourly' | 'daily' | 'summary'>('hourly');
+
+  // Load data from Google Sheets on mount
+  useEffect(() => {
+    const loadData = async () => {
+      try {
+        const [hourly, daily] = await Promise.all([
+          fetchHourlyLogs(),
+          fetchDailyLogs(),
+        ]);
+        setHourlyLogs(hourly);
+        setDailyLogs(daily);
+      } catch (error) {
+        console.error('Failed to load data from Google Sheets:', error);
+        // Fallback to localStorage if API fails
+      }
+    };
+    loadData();
+  }, []);
 
   // Update clock every second
   useEffect(() => {
@@ -65,22 +84,40 @@ function App() {
   }, [hourlyLogs]);
 
   // Add hourly log
-  const addHourlyLog = (log: Omit<HourlyLog, 'id' | 'timestamp'>) => {
+  const addHourlyLog = async (log: Omit<HourlyLog, 'id'>) => {
     const newLog: HourlyLog = {
       ...log,
       id: Date.now().toString(),
-      timestamp: new Date()
+      timestamp: new Date(),
     };
-    setHourlyLogs(prev => [...prev, newLog]);
+  
+    // Save to Google Sheets
+    try {
+      await saveHourlyLog(newLog);
+      setHourlyLogs(prev => [...prev, newLog]);
+    } catch (error) {
+      console.error('Failed to save to Google Sheets:', error);
+      alert('Failed to sync with Google Sheets. Data saved locally only.');
+      setHourlyLogs(prev => [...prev, newLog]);
+    }
   };
 
   // Add daily log
-  const addDailyLog = (log: Omit<DailyLog, 'id'>) => {
+  const addDailyLog = async (log: Omit<DailyLog, 'id'>) => {
     const newLog: DailyLog = {
       ...log,
-      id: Date.now().toString()
+      id: Date.now().toString(),
     };
-    setDailyLogs(prev => [...prev, newLog]);
+  
+    // Save to Google Sheets
+    try {
+      await saveDailyLog(newLog);
+      setDailyLogs(prev => [...prev, newLog]);
+    } catch (error) {
+      console.error('Failed to save to Google Sheets:', error);
+      alert('Failed to sync with Google Sheets. Data saved locally only.');
+      setDailyLogs(prev => [...prev, newLog]);
+    }
   };
 
   // Export CSV
