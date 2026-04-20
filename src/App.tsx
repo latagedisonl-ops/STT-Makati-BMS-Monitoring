@@ -287,4 +287,495 @@ export default function App() {
   const [modal,   setModal]     = useState(false);
   const [modalTab,setModalTab]  = useState<"hourly"|"daily">("hourly");
   const [selHour, setSelHour]   = useState(HOURS[Math.min(new Date().getHours(),23)]);
-  const [hf, s
+  const [hf, setHf] = useState({ temp:"", hum:"", itLoad:"", totalPwr:"" });
+  const [df, setDf] = useState({ date:"", cooling:"", it:"", others:"", supsLoss:"", txLoss:"" });
+  const [drag, setDrag] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  useEffect(()=>{ const t=setInterval(()=>setClock(new Date()),1000); return()=>clearInterval(t); },[]);
+  const msg = (m:string) => { setToast(m); setTimeout(()=>setToast(""),3200); };
+
+  if (showWelcome) return <WelcomePage onEnter={() => setShowWelcome(false)} />;
+
+  // ── DERIVED ────────────────────────────────────────────────────────────────
+  const latestHour = [...HOURS].reverse().find(h=>hourly[h]);
+  const latest     = latestHour ? hourly[latestHour] : null;
+  const hallAvg    = (key:keyof HallEntry, dec=1) => latest
+    ? +(HALLS.reduce((s,h)=>s+(latest[h.id]?.[key]??0),0)/HALLS.length).toFixed(dec) : null;
+  const avgPUE  = hallAvg("pue",2);
+  const avgTemp = hallAvg("temp",1);
+  const avgHum  = hallAvg("hum",1);
+  const totalIT = latest ? HALLS.reduce((s,h)=>s+(latest[h.id]?.itLoad??0),0) : null;
+  const pueStatus = avgPUE ? getPueStatus(avgPUE) : "ok";
+  const pueColor  = SC[pueStatus];
+
+  const multiData = HOURS.filter(h=>hourly[h]).map(h=>{
+    const row:any = { hour:h };
+    HALLS.forEach(hh=>{ row[hh.id]=hourly[h]?.[hh.id]?.[metric]; });
+    return row;
+  });
+  const dayChartData = daily.slice(-5);
+  const hPUE = (hf.itLoad && hf.totalPwr) ? +(parseFloat(hf.totalPwr)/parseFloat(hf.itLoad)).toFixed(2) : null;
+  const dTotal = [df.it,df.cooling,df.others,df.supsLoss,df.txLoss].reduce((s,v)=>s+(parseFloat(v)||0),0);
+  const dPUE   = df.it && dTotal ? +(dTotal/parseFloat(df.it)).toFixed(2) : null;
+
+  // ── SUBMIT ─────────────────────────────────────────────────────────────────
+  const submitHourly = () => {
+    const t=parseFloat(hf.temp),hu=parseFloat(hf.hum),it=parseFloat(hf.itLoad),tp=parseFloat(hf.totalPwr);
+    if([t,hu,it,tp].some(isNaN)){ msg("⚠ Fill all fields"); return; }
+    const pue=+(tp/it).toFixed(2);
+    setHourly(prev=>({...prev,[selHour]:{...(prev[selHour]||{}),[activeHall]:{temp:t,hum:hu,itLoad:it,totalPwr:tp,pue}}}));
+    setHf({temp:"",hum:"",itLoad:"",totalPwr:""});
+    setModal(false);
+    msg(`✓ Hall ${activeHall} @ ${selHour} saved · PUE: ${pue}`);
+  };
+
+  const submitDaily = () => {
+    const it=parseFloat(df.it),cool=parseFloat(df.cooling),oth=parseFloat(df.others),
+          sups=parseFloat(df.supsLoss),tx=parseFloat(df.txLoss);
+    if([it,cool,oth,sups,tx].some(isNaN)||!df.date){ msg("⚠ Fill all fields + date"); return; }
+    const total=it+cool+oth+sups+tx, pue=+(total/it).toFixed(2);
+    const label=isoToLabel(df.date);
+    const entry:DayEntry={date:label,totalUtility:total,cooling:cool,it,others:oth,supsLoss:sups,txLoss:tx,pue};
+    setDaily(prev=>{ const idx=prev.findIndex(d=>d.date===label); if(idx>=0){const n=[...prev];n[idx]=entry;return n;} return[...prev,entry]; });
+    setDf({date:"",cooling:"",it:"",others:"",supsLoss:"",txLoss:""});
+    setModal(false);
+    msg(`✓ Daily entry for ${label} saved · PUE: ${pue}`);
+  };
+
+  // ── EXPORT ─────────────────────────────────────────────────────────────────
+  const exportHourlyCSV = () => {
+    const hdr=["Timestamp","Hall","Hour","Temperature_C","Humidity_pct","IT_Load_kW","Total_Power_kW","PUE"];
+    const rows:string[]=[];
+    HOURS.forEach(h=>{ if(!hourly[h]) return; HALLS.forEach(hh=>{ const d=hourly[h]?.[hh.id]; if(!d) return;
+      rows.push([new Date().toISOString(),hh.id,h,d.temp,d.hum,d.itLoad,d.totalPwr,d.pue].join(",")); });});
+    const csv=[hdr.join(","),...rows].join("\n");
+    dl(csv,"STT_BMS_Hourly.csv","text/csv");
+    msg("✓ Hourly CSV exported");
+  };
+
+  const exportDailyCSV = () => {
+    const hdr=["Date","Total_Utility_kWh","Cooling_kWh","IT_kWh","Others_kWh","SUPS_Loss_kWh","TX_Loss_kWh","PUE"];
+    const rows=daily.map(d=>[d.date,d.totalUtility,d.cooling,d.it,d.others,d.supsLoss,d.txLoss,d.pue].join(","));
+    dl([hdr.join(","),...rows].join("\n"),"STT_BMS_Daily.csv","text/csv");
+    msg("✓ Daily CSV exported");
+  };
+
+  const dl = (content:string, name:string, type:string) => {
+    const a=document.createElement("a");
+    a.href=URL.createObjectURL(new Blob([content],{type}));
+    a.download=name; a.click();
+  };
+
+  // ── IMPORT (auto-detect CSV or PDF text) ───────────────────────────────────
+  const handleFile = (file:File) => {
+    const reader=new FileReader();
+    reader.onload=ev=>{
+      const text=ev.target?.result as string;
+      if(!text?.trim()){ msg("⚠ File appears empty"); return; }
+      try {
+        const { hourly:h, daily:d, skipped } = detectAndParseCSV(text);
+        const hCount=Object.keys(h).length, dCount=d.length;
+        if(hCount>0) setHourly(prev=>({...prev,...h}));
+        if(dCount>0) setDaily(prev=>{
+          const merged=[...prev];
+          d.forEach(entry=>{ const idx=merged.findIndex(x=>x.date===entry.date);
+            if(idx>=0) merged[idx]=entry; else merged.push(entry); });
+          return merged;
+        });
+        const parts=[];
+        if(hCount>0) parts.push(`${hCount} hourly hour-slots`);
+        if(dCount>0) parts.push(`${dCount} daily entries`);
+        if(parts.length===0){ msg("⚠ No valid data found — check file format"); return; }
+        msg(`✓ Imported: ${parts.join(", ")}${skipped>0?` · ${skipped} rows skipped`:""}`);
+      } catch(e){ msg("⚠ Could not parse file — ensure it's a valid CSV"); }
+    };
+    // PDF: read as text (works for text-layer PDFs exported from Sheets)
+    reader.readAsText(file);
+  };
+
+  const onFileInput = (e:React.ChangeEvent<HTMLInputElement>) => {
+    const f=e.target.files?.[0]; if(f) handleFile(f); e.target.value="";
+  };
+  const onDrop = (e:React.DragEvent) => {
+    e.preventDefault(); setDrag(false);
+    const f=e.dataTransfer.files[0]; if(f) handleFile(f);
+  };
+
+  const aHall=HALLS.find(h=>h.id===activeHall)!;
+
+  const dayAvg=(key:keyof DayEntry,dec=0)=>daily.length
+    ? +(daily.reduce((s,d)=>s+((d[key] as number)||0),0)/daily.length).toFixed(dec):null;
+
+  // ── RENDER ─────────────────────────────────────────────────────────────────
+  return (
+    <>
+      <style>{CSS}</style>
+      <input ref={fileRef} type="file" accept=".csv,.txt,.pdf" style={{display:"none"}} onChange={onFileInput}/>
+      <div className="root">
+
+        {/* HEADER */}
+        <header className="hdr">
+          <div className="hdr-main">
+            <div className="brand"><BMSIcon/><div className="brand-txt"><span className="t1">BMS MONITORING</span><span className="t2">FOR STT MAKATI</span></div></div>
+            <div className="vsep"/>
+            <div className="kpi-strip">
+              {[
+                {l:"AVG PUE",  v:avgPUE,  u:"",   c:avgPUE?pueColor:"#4a6280"},
+                {l:"AVG TEMP", v:avgTemp, u:"°C", c:avgTemp?SC[getTempStatus(avgTemp)]:"#4a6280"},
+                {l:"AVG HUM",  v:avgHum,  u:"%",  c:avgHum?SC[getHumStatus(avgHum)]:"#4a6280"},
+                {l:"TOTAL IT", v:totalIT, u:" kW",c:"#a3e635"},
+              ].map((k,i)=>(
+                <div key={i} className="kpi-item">
+                  <span className="kl">{k.l}</span>
+                  <span className="kv" style={{color:k.c}}>{k.v??'—'}{k.u}</span>
+                </div>
+              ))}
+            </div>
+            <div className="vsep"/>
+            <div className="hdr-right">
+              {/* Import — drag & drop or click */}
+              <div
+                onDragOver={e=>{e.preventDefault();setDrag(true);}}
+                onDragLeave={()=>setDrag(false)}
+                onDrop={onDrop}
+                style={{display:"flex"}}>
+                <button className={`btn btn-ghost ${drag?"":"" }`}
+                  style={{fontSize:10, borderColor: drag?"#00e5ff":undefined, color: drag?"#00e5ff":undefined}}
+                  onClick={()=>fileRef.current?.click()}>
+                  ⬆ Import
+                </button>
+              </div>
+              <div style={{position:"relative",display:"flex",gap:4}}>
+                <button className="btn btn-ghost" style={{fontSize:10}} onClick={exportHourlyCSV}>⬇ Hourly CSV</button>
+                <button className="btn btn-ghost" style={{fontSize:10}} onClick={exportDailyCSV}>⬇ Daily CSV</button>
+              </div>
+              <button className="btn btn-accent" onClick={()=>setModal(true)}>+ Log Reading</button>
+              <div className="vsep"/>
+              <div className="clk-blk">
+                <span className="clk-t">{clock.toLocaleTimeString("en-GB",{hour12:false})}</span>
+                <span className="clk-d">{clock.toLocaleDateString("en-GB",{weekday:"short",day:"2-digit",month:"short",year:"numeric"}).toUpperCase()}</span>
+              </div>
+              <div className="live-pill"><div className="dot"/>LIVE</div>
+            </div>
+          </div>
+          <div className="tabs-bar">
+            <div className={`tab ${tab==="monitor"?"on":""}`} onClick={()=>setTab("monitor")}>🏢 Live Monitor</div>
+            <div className={`tab ${tab==="summary"?"on":""}`} onClick={()=>setTab("summary")}>📅 5-Day Summary</div>
+          </div>
+        </header>
+
+        <div className="body">
+          {tab==="monitor" && <>
+            {/* KPI Row */}
+            <div className="krow">
+              {[
+                {l:"FACILITY PUE",v:avgPUE,  u:"",   c:"#00e5ff",i:"⚡",s:avgPUE?getPueStatus(avgPUE):"ok"},
+                {l:"TOTAL IT",   v:totalIT, u:"kW", c:"#a3e635",i:"🖥",s:"ok" as const},
+                {l:"TOTAL PWR",  v:latest?HALLS.reduce((s,h)=>s+(latest[h.id]?.totalPwr??0),0):null,u:"kW",c:"#f97316",i:"🔋",s:"ok" as const},
+                {l:"AVG TEMP",   v:avgTemp, u:"°C", c:"#f97316",i:"🌡",s:avgTemp?getTempStatus(avgTemp):"ok" as const},
+                {l:"AVG HUM",    v:avgHum,  u:"%",  c:"#38bdf8",i:"💧",s:avgHum?getHumStatus(avgHum):"ok" as const},
+              ].map((k,i)=>(
+                <div key={i} className="kcard" style={{borderTopColor:k.c}}>
+                  <div className="kico">{k.i}</div>
+                  <div className="klbl">{k.l}</div>
+                  <div className="kval" style={{color:k.c}}>{k.v??'—'}<span className="kunit">{k.u}</span></div>
+                  <div className="ksub" style={{color:SC[k.s as keyof typeof SC]}}>● {k.s.toUpperCase()}</div>
+                </div>
+              ))}
+            </div>
+
+            {/* Hall Cards */}
+            <div className="halls">
+              {HALLS.map(hall=>{
+                const d=latest?.[hall.id];
+                const ts=d?getTempStatus(d.temp):"ok", hs=d?getHumStatus(d.hum):"ok", ps=d?getPueStatus(d.pue):"ok";
+                const active=activeHall===hall.id;
+                return (
+                  <div key={hall.id} className="hcard" onClick={()=>setHall(hall.id)}
+                    style={{borderColor:active?hall.color:"#1a2d4a",boxShadow:active?`0 0 20px ${hall.glow}`:undefined}}>
+                    <div className="hcard-top" style={{background:`linear-gradient(90deg,${hall.color},transparent)`}}/>
+                    <div className="hcard-hdr">
+                      <div className="hid" style={{color:hall.color,textShadow:active?`0 0 14px ${hall.glow}`:undefined}}>HALL {hall.id}</div>
+                      <div className="hcard-meta">
+                        <div className={`dot ${d?"":"off"}`}/>
+                        {d && <span className={`pue-badge pill ${ps}`}>PUE {d.pue}</span>}
+                      </div>
+                    </div>
+                    <MiniBar value={d?.temp} min={15} max={40} color={SC[ts]} label="TEMPERATURE" unit="°C"/>
+                    <MiniBar value={d?.hum}  min={0}  max={100} color={SC[hs]} label="HUMIDITY"    unit="%"/>
+                    <MiniBar value={d?.pue}  min={1}  max={2.5} color={SC[ps]} label="PUE"         unit=""/>
+                    <div className="hcard-foot">
+                      <span>IT: <span style={{color:hall.color}}>{d?.itLoad??'—'} kW</span></span>
+                      <span>PWR: {d?.totalPwr??'—'} kW</span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* PUE Section */}
+            <div className="pue-section" style={{boxShadow:avgPUE?`0 0 50px ${pueColor}18`:undefined,borderColor:avgPUE?`${pueColor}44`:undefined}}>
+              <div className="pue-left">
+                <span className="pue-sub-lbl">FACILITY AVERAGE</span>
+                <div className="pue-val" style={{color:pueColor,textShadow:`0 0 30px ${pueColor},0 0 60px ${pueColor}88`}}>{avgPUE??'—'}</div>
+                <span className="pue-name">POWER USAGE EFFECTIVENESS</span>
+                <span className="pue-target">Target ≤ 1.83 · Ideal 1.00</span>
+                <div className="pue-legend">
+                  <span style={{color:"#a3e635"}}>■ ≤1.6 GOOD</span>
+                  <span style={{color:"#facc15"}}>■ WARN</span>
+                  <span style={{color:"#f43f5e"}}>■ CRIT</span>
+                </div>
+              </div>
+              <div className="pue-divider"/>
+              <div className="pue-bars">
+                <div className="pue-bars-lbl">PER HALL</div>
+                {HALLS.map(hall=>{
+                  const d=latest?.[hall.id], ps=d?getPueStatus(d.pue):"ok";
+                  const pct=d?Math.min(100,((d.pue-1)/(2.5-1))*100):0;
+                  return (
+                    <div key={hall.id} className="pr">
+                      <div className="pr-id" style={{color:hall.color}}>{hall.id}</div>
+                      <div className="pr-bg"><div className="pr-fg" style={{width:`${pct}%`,background:SC[ps],boxShadow:`0 0 6px ${SC[ps]}`}}/></div>
+                      <div className="pr-val" style={{color:SC[ps],textShadow:`0 0 7px ${SC[ps]}`}}>{d?.pue??'—'}</div>
+                      <span className={`pr-pill pill ${ps}`}>{ps.toUpperCase()}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Trend Chart */}
+            <div className="panel trend-panel">
+              <div className="ptitle">
+                📈 Multi-Hall Trend
+                <div className="mtabs" style={{marginLeft:"auto"}}>
+                  {(["temp","hum","pue"] as const).map(k=>(
+                    <button key={k} className={`mtab ${metric===k?"on":""}`} onClick={()=>setMetric(k)}>
+                      {k==="temp"?"🌡 TEMP":k==="hum"?"💧 HUM":"⚡ PUE"}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <ResponsiveContainer width="100%" height={210}>
+                <LineChart data={multiData} margin={{top:4,right:10,left:-20,bottom:0}}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#1a2d4a"/>
+                  <XAxis dataKey="hour" tick={{fill:"#4a6280",fontSize:9,fontFamily:"Share Tech Mono"}}/>
+                  <YAxis tick={{fill:"#4a6280",fontSize:9,fontFamily:"Share Tech Mono"}}/>
+                  <Tooltip content={<CTip/>}/>
+                  {metric==="temp"&&<ReferenceLine y={26}   stroke="#facc15" strokeDasharray="5 4" strokeWidth={1}/>}
+                  {metric==="hum" &&<ReferenceLine y={60}   stroke="#facc15" strokeDasharray="5 4" strokeWidth={1}/>}
+                  {metric==="pue" &&<ReferenceLine y={1.83} stroke="#facc15" strokeDasharray="5 4" strokeWidth={1}/>}
+                  {HALLS.map(h=>(
+                    <Line key={h.id} type="monotone" dataKey={h.id} name={`Hall ${h.id}`}
+                      stroke={h.color} strokeWidth={2} dot={false}
+                      activeDot={{r:4,fill:h.color,stroke:"#060b14",strokeWidth:1.5}}/>
+                  ))}
+                </LineChart>
+              </ResponsiveContainer>
+              <div className="chart-legend">
+                {HALLS.map(h=>(<span key={h.id} style={{color:h.color}}>─ HALL {h.id}</span>))}
+                <span style={{color:"#facc15"}}>-- THRESHOLD</span>
+              </div>
+            </div>
+          </>}
+
+          {tab==="summary" && <>
+            <div className="panel" style={{marginBottom:12}}>
+              <div className="ptitle">📋 Energy Summary</div>
+              <div className="tbl-wrap">
+                <table className="dtbl">
+                  <thead><tr>
+                    <th style={{textAlign:"left"}}>DATE</th>
+                    <th>TOTAL UTILITY kWh</th><th>COOLING kWh</th><th>IT kWh</th>
+                    <th>OTHERS kWh</th><th>SUPS LOSS kWh</th><th>TX LOSS kWh</th><th>PUE</th>
+                  </tr></thead>
+                  <tbody>
+                    {daily.map((d,i)=>{ const ps=getPueStatus(d.pue); return (
+                      <tr key={i}>
+                        <td>{d.date}</td>
+                        <td>{d.totalUtility?.toLocaleString()}</td>
+                        <td style={{color:"#38bdf8"}}>{d.cooling?.toLocaleString()}</td>
+                        <td style={{color:"#a3e635"}}>{d.it?.toLocaleString()}</td>
+                        <td>{d.others?.toLocaleString()}</td>
+                        <td style={{color:"#facc15"}}>{d.supsLoss?.toLocaleString()}</td>
+                        <td style={{color:"#f43f5e"}}>{d.txLoss?.toLocaleString()}</td>
+                        <td><span style={{color:SC[ps],fontWeight:900,fontFamily:"Share Tech Mono",marginRight:6}}>{d.pue}</span>
+                          <span className={`pill ${ps}`}>{ps.toUpperCase()}</span></td>
+                      </tr>);
+                    })}
+                    <tr className="avg-row">
+                      <td>COLUMN AVG</td>
+                      <td>{dayAvg("totalUtility")?.toLocaleString()}</td>
+                      <td>{dayAvg("cooling")?.toLocaleString()}</td>
+                      <td>{dayAvg("it")?.toLocaleString()}</td>
+                      <td>{dayAvg("others")?.toLocaleString()}</td>
+                      <td>{dayAvg("supsLoss")?.toLocaleString()}</td>
+                      <td>{dayAvg("txLoss")?.toLocaleString()}</td>
+                      <td>{dayAvg("pue",2)}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            <div className="day-charts">
+              <div className="panel">
+                <div className="ptitle">⚡ 5-Day PUE Trend</div>
+                <ResponsiveContainer width="100%" height={200}>
+                  <AreaChart data={dayChartData} margin={{top:8,right:8,left:-20,bottom:0}}>
+                    <defs>
+                      <linearGradient id="pgrad" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%"  stopColor="#00e5ff" stopOpacity={.22}/>
+                        <stop offset="95%" stopColor="#00e5ff" stopOpacity={0}/>
+                      </linearGradient>
+                    </defs>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#1a2d4a"/>
+                    <XAxis dataKey="date" tick={{fill:"#4a6280",fontSize:9,fontFamily:"Share Tech Mono"}}/>
+                    <YAxis tick={{fill:"#4a6280",fontSize:9,fontFamily:"Share Tech Mono"}} domain={["auto","auto"]}/>
+                    <Tooltip content={<CTip/>}/>
+                    <ReferenceLine y={1.83} stroke="#facc15" strokeDasharray="5 4" strokeWidth={1}/>
+                    <Area type="monotone" dataKey="pue" name="PUE" stroke="#00e5ff" strokeWidth={2} fill="url(#pgrad)"
+                      dot={(props:any)=>{ const {cx,cy,payload}=props; const c=SC[getPueStatus(payload.pue)];
+                        return <circle key={cx} cx={cx} cy={cy} r={6} fill={c} stroke="#060b14" strokeWidth={2}
+                          style={{filter:`drop-shadow(0 0 5px ${c})`}}/>;}}/>
+                  </AreaChart>
+                </ResponsiveContainer>
+              </div>
+              <div className="panel">
+                <div className="ptitle">🔋 5-Day Energy Breakdown</div>
+                <ResponsiveContainer width="100%" height={200}>
+                  <BarChart data={dayChartData} margin={{top:4,right:8,left:-20,bottom:0}}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#1a2d4a" vertical={false}/>
+                    <XAxis dataKey="date" tick={{fill:"#4a6280",fontSize:9,fontFamily:"Share Tech Mono"}}/>
+                    <YAxis tick={{fill:"#4a6280",fontSize:9,fontFamily:"Share Tech Mono"}}/>
+                    <Tooltip content={<CTip/>}/>
+                    <Bar dataKey="it"       name="IT Load"   stackId="s" fill="#a3e635"/>
+                    <Bar dataKey="cooling"  name="Cooling"   stackId="s" fill="#38bdf8"/>
+                    <Bar dataKey="others"   name="Others"    stackId="s" fill="#e879f9"/>
+                    <Bar dataKey="supsLoss" name="SUPS Loss" stackId="s" fill="#facc15"/>
+                    <Bar dataKey="txLoss"   name="TX Loss"   stackId="s" fill="#f43f5e" radius={[2,2,0,0]}/>
+                  </BarChart>
+                </ResponsiveContainer>
+                <div className="chart-legend" style={{marginTop:8}}>
+                  {[["#a3e635","IT"],["#38bdf8","Cooling"],["#e879f9","Others"],["#facc15","SUPS"],["#f43f5e","TX"]].map(([c,l])=>(
+                    <span key={l} style={{color:c}}>■ {l}</span>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </>}
+        </div>
+
+        {/* Credit Bar */}
+        <div className="credit-bar">
+          <span>DC · BMS Monitoring System  ·  STT Makati</span>
+          <span>Developed by <span style={{color:"#00e5ff",letterSpacing:1}}>Edison Latag</span>  ·  v1.0.0</span>
+        </div>
+
+        {/* MODAL */}
+        {modal && (
+          <div className="overlay" onClick={e=>{if(e.target===e.currentTarget)setModal(false);}}>
+            <div className="modal">
+              <div className="modal-ttl">+ Log Reading</div>
+              <div className="modal-tabs">
+                <button className={`modal-tab ${modalTab==="hourly"?"on":""}`} onClick={()=>setModalTab("hourly")}>🏢 Hourly Monitor</button>
+                <button className={`modal-tab ${modalTab==="daily"?"on":""}`}  onClick={()=>setModalTab("daily")}>📅 Daily Summary</button>
+              </div>
+
+              {/* Import drop zone inside modal */}
+              <div className={`import-zone ${drag?"drag":""}`}
+                onDragOver={e=>{e.preventDefault();setDrag(true);}}
+                onDragLeave={()=>setDrag(false)}
+                onDrop={onDrop}
+                onClick={()=>fileRef.current?.click()}>
+                <div className="import-zone-icon">📂</div>
+                <div className="import-zone-lbl">Drop CSV here or click to import</div>
+                <div className="import-zone-sub">Auto-detects hourly or daily format · CSV or text PDF</div>
+              </div>
+
+              {modalTab==="hourly" && <>
+                <div style={{marginBottom:10}}>
+                  <div className="flbl">Select Hall</div>
+                  <div className="hall-tabs">
+                    {HALLS.map(h=>(
+                      <button key={h.id} className="htab-btn" onClick={()=>setHall(h.id)}
+                        style={{borderWidth:1,borderStyle:"solid",
+                          borderColor:activeHall===h.id?h.color:"#1a2d4a",
+                          color:activeHall===h.id?h.color:"#4a6280",
+                          background:activeHall===h.id?`${h.color}12`:"#060b14"}}>
+                        {h.id}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div style={{marginBottom:10}}>
+                  <label className="flbl">Hour Slot</label>
+                  <select className="sel" value={selHour} onChange={e=>setSelHour(e.target.value)}>
+                    {HOURS.map(h=><option key={h} value={h}>{h} {hourly[h]?.[activeHall]?"✓":""}</option>)}
+                  </select>
+                </div>
+                <div className="fg2">
+                  {[
+                    {k:"temp"    as const,l:"Temperature",u:"°C",ph:"e.g. 23.5",c:"#f97316"},
+                    {k:"hum"     as const,l:"Humidity",   u:"%", ph:"e.g. 55",  c:"#38bdf8"},
+                    {k:"itLoad"  as const,l:"IT Load",    u:"kW",ph:"e.g. 120", c:"#a3e635"},
+                    {k:"totalPwr"as const,l:"Total Power",u:"kW",ph:"e.g. 190", c:"#e879f9"},
+                  ].map(f=>(
+                    <div key={f.k}>
+                      <label className="flbl" style={{color:f.c}}>{f.l} ({f.u})</label>
+                      <input className="inp" type="number" placeholder={f.ph}
+                        value={hf[f.k]} onChange={e=>setHf(p=>({...p,[f.k]:e.target.value}))}/>
+                    </div>
+                  ))}
+                </div>
+                <div className="pue-calc">
+                  PUE = Total Power ÷ IT Load &nbsp;→&nbsp;
+                  <span style={{color:hPUE?SC[getPueStatus(hPUE)]:"#4a6280",fontWeight:900,fontSize:14}}>{hPUE??'—'}</span>
+                  {hPUE&&<span className={`pill ${getPueStatus(hPUE)}`} style={{marginLeft:8}}>{getPueStatus(hPUE).toUpperCase()}</span>}
+                </div>
+                <div className="btn-row">
+                  <button className="btn btn-danger" style={{flex:1}} onClick={()=>setModal(false)}>Cancel</button>
+                  <button className="btn btn-accent" style={{flex:2}} onClick={submitHourly}>Log Hall {activeHall} @ {selHour}</button>
+                </div>
+              </>}
+
+              {modalTab==="daily" && <>
+                <div style={{marginBottom:10}}>
+                  <label className="flbl">Date</label>
+                  <input className="inp" type="date" value={df.date}
+                    onChange={e=>setDf(p=>({...p,date:e.target.value}))} style={{colorScheme:"dark"}}/>
+                </div>
+                <div className="fg2">
+                  {[
+                    {k:"it"      as const,l:"IT Load",   u:"kWh",ph:"e.g. 9800",c:"#a3e635"},
+                    {k:"cooling" as const,l:"Cooling",   u:"kWh",ph:"e.g. 5800",c:"#38bdf8"},
+                    {k:"others"  as const,l:"Others",    u:"kWh",ph:"e.g. 1400",c:"#e879f9"},
+                    {k:"supsLoss"as const,l:"SUPS Loss", u:"kWh",ph:"e.g. 820", c:"#facc15"},
+                    {k:"txLoss"  as const,l:"TX Loss",   u:"kWh",ph:"e.g. 580", c:"#f43f5e"},
+                  ].map(f=>(
+                    <div key={f.k}>
+                      <label className="flbl" style={{color:f.c}}>{f.l} ({f.u})</label>
+                      <input className="inp" type="number" placeholder={f.ph}
+                        value={df[f.k]} onChange={e=>setDf(p=>({...p,[f.k]:e.target.value}))}/>
+                    </div>
+                  ))}
+                </div>
+                <div className="pue-calc">
+                  Total Utility = <span style={{color:"#00e5ff",fontWeight:900}}>{dTotal>0?dTotal.toLocaleString():"—"} kWh</span>
+                  &nbsp;·&nbsp; PUE = <span style={{color:dPUE?SC[getPueStatus(dPUE)]:"#4a6280",fontWeight:900,fontSize:14}}>{dPUE??'—'}</span>
+                  {dPUE&&<span className={`pill ${getPueStatus(dPUE)}`} style={{marginLeft:8}}>{getPueStatus(dPUE).toUpperCase()}</span>}
+                </div>
+                <div className="btn-row">
+                  <button className="btn btn-danger" style={{flex:1}} onClick={()=>setModal(false)}>Cancel</button>
+                  <button className="btn btn-accent" style={{flex:2}} onClick={submitDaily}>Save Daily Entry</button>
+                </div>
+              </>}
+            </div>
+          </div>
+        )}
+
+        {toast && <div className="toast">{toast}</div>}
+      </div>
+    </>
+  );
+}
