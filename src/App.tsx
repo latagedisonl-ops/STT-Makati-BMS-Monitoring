@@ -5,7 +5,10 @@ import {
   ResponsiveContainer, ReferenceLine
 } from "recharts";
 import WelcomePage from "./WelcomePage";
-import { SAMPLE_HOURLY, SAMPLE_DAILY } from "./sampleData";
+import type { HourlyData } from "./sampleData";
+
+const STORAGE_KEY = "stt-bms-state-v1";
+interface ActivityEntry { ts: number; msg: string; kind: "hourly" | "daily" | "import" | "clear"; }
 
 // ── CONSTANTS ─────────────────────────────────────────────────────────────────
 const HALLS = [
@@ -24,7 +27,6 @@ const getTempStatus = (v:number) => v>30?"crit":v>26?"warn":"ok";
 const getHumStatus  = (v:number) => (v>70||v<30)?"warn":"ok";
 const getPueStatus  = (v:number) => v>1.83?"crit":v>1.6?"warn":"ok";
 
-function fmtDate(dt:Date){ return `${String(dt.getDate()).padStart(2,"0")} ${MONTHS[dt.getMonth()]} '${String(dt.getFullYear()).slice(2)}`; }
 function isoToLabel(iso:string){ const [y,m,d]=iso.split("-"); return `${d} ${MONTHS[parseInt(m)-1]} '${y.slice(2)}`; }
 
 // ── TYPES ─────────────────────────────────────────────────────────────────────
@@ -70,8 +72,13 @@ const CSS = `
 @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Barlow+Condensed:wght@300;400;600;700;900&display=swap');
 *{box-sizing:border-box;margin:0;padding:0;}
 body{background:#060b14;overflow-x:hidden;}
-:root{--bg:#060b14;--panel:#0a1628;--panel2:#0d1e35;--border:#1a2d4a;--accent:#00e5ff;--dim:#2a4060;--text:#c8dff0;--muted:#4a6280;}
-.root{font-family:'Barlow Condensed',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;}
+:root{--bg:#060b14;--panel:#0a1628;--panel2:#0d1e35;--border:#1a2d4a;--accent:#00e5ff;--dim:#2a4060;--text:#c8dff0;--muted:#4a6280;--ease:cubic-bezier(.22,.61,.36,1);}
+.root{font-family:'Barlow Condensed',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;animation:pageIn .5s var(--ease) both;}
+@keyframes pageIn{from{opacity:0;transform:translateY(6px);}to{opacity:1;transform:translateY(0);}}
+@keyframes fadeUp{from{opacity:0;transform:translateY(8px);}to{opacity:1;transform:translateY(0);}}
+@keyframes popIn{from{opacity:0;transform:scale(.96);}to{opacity:1;transform:scale(1);}}
+@keyframes rowIn{from{opacity:0;transform:translateX(-6px);}to{opacity:1;transform:translateX(0);}}
+@keyframes shimmer{0%{background-position:-200% 0;}100%{background-position:200% 0;}}
 .hdr{background:rgba(10,22,40,0.97);border-bottom:1px solid var(--border);backdrop-filter:blur(12px);position:sticky;top:0;z-index:200;box-shadow:0 2px 30px rgba(0,0,0,.9);}
 .hdr-main{display:flex;align-items:center;padding:0 20px;height:56px;gap:14px;}
 .brand{display:flex;align-items:center;gap:10px;min-width:190px;}
@@ -92,15 +99,16 @@ body{background:#060b14;overflow-x:hidden;}
 .dot.off{background:#2a4060;box-shadow:none;animation:none;}
 @keyframes blink{0%,100%{opacity:1;transform:scale(1);}50%{opacity:.2;transform:scale(.5);}}
 .tabs-bar{display:flex;padding:0 20px;background:rgba(10,22,40,.95);border-bottom:1px solid var(--border);}
-.tab{padding:9px 20px;font-size:11px;font-weight:700;letter-spacing:2px;text-transform:uppercase;cursor:pointer;border-bottom:2px solid transparent;color:var(--muted);transition:all .15s;user-select:none;}
-.tab.on{color:var(--accent);border-bottom-color:var(--accent);}
-.tab:hover:not(.on){color:var(--text);}
+.tab{padding:9px 20px;font-size:11px;font-weight:700;letter-spacing:2px;text-transform:uppercase;cursor:pointer;border-bottom:2px solid transparent;color:var(--muted);transition:color .25s var(--ease),border-color .25s var(--ease),background .25s var(--ease);user-select:none;position:relative;}
+.tab.on{color:var(--accent);border-bottom-color:var(--accent);background:linear-gradient(180deg,transparent,rgba(0,229,255,.05));}
+.tab:hover:not(.on){color:var(--text);background:rgba(0,229,255,.03);}
 .body{padding:14px 20px 50px;}
 .panel{background:var(--panel);border:1px solid var(--border);border-radius:4px;padding:15px 17px;}
 .ptitle{font-size:10px;font-weight:700;letter-spacing:3px;color:var(--muted);text-transform:uppercase;margin-bottom:11px;display:flex;align-items:center;gap:8px;}
 .ptitle::after{content:'';flex:1;height:1px;background:var(--border);}
 .halls{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:12px;}
-.hcard{background:var(--panel);border:1px solid var(--border);border-radius:5px;padding:14px 13px 11px;cursor:pointer;transition:border-color .2s,box-shadow .2s;position:relative;overflow:hidden;user-select:none;}
+.hcard{background:var(--panel);border:1px solid var(--border);border-radius:5px;padding:14px 13px 11px;cursor:pointer;transition:border-color .35s var(--ease),box-shadow .35s var(--ease),transform .35s var(--ease),background .35s var(--ease);position:relative;overflow:hidden;user-select:none;animation:fadeUp .5s var(--ease) both;}
+.hcard:hover{transform:translateY(-3px);background:var(--panel2);}
 .hcard-top{position:absolute;top:0;left:0;right:0;height:3px;}
 .hcard-hdr{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:10px;}
 .hid{font-size:22px;font-weight:900;letter-spacing:2px;line-height:1;}
@@ -140,15 +148,16 @@ body{background:#060b14;overflow-x:hidden;}
 .avg-row td{background:rgba(0,229,255,.06)!important;border-top:1px solid var(--border);color:var(--accent);font-weight:900;}
 .avg-row td:first-child{color:var(--muted);font-weight:400;}
 .day-charts{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
-.btn{padding:7px 13px;border:none;border-radius:3px;cursor:pointer;font-family:'Barlow Condensed',sans-serif;font-size:11px;font-weight:700;letter-spacing:2px;text-transform:uppercase;transition:all .15s;display:inline-flex;align-items:center;gap:5px;}
+.btn{padding:7px 13px;border:none;border-radius:3px;cursor:pointer;font-family:'Barlow Condensed',sans-serif;font-size:11px;font-weight:700;letter-spacing:2px;text-transform:uppercase;transition:transform .2s var(--ease),background .2s var(--ease),box-shadow .25s var(--ease),border-color .2s var(--ease),color .2s var(--ease);display:inline-flex;align-items:center;gap:5px;}
+.btn:active{transform:scale(.96);}
 .btn-accent{background:var(--accent);color:#060b14;}
-.btn-accent:hover{background:#33ecff;box-shadow:0 0 14px rgba(0,229,255,.4);}
+.btn-accent:hover{background:#33ecff;box-shadow:0 0 18px rgba(0,229,255,.55);transform:translateY(-1px);}
 .btn-ghost{background:transparent;border:1px solid var(--dim);color:var(--muted);}
-.btn-ghost:hover{border-color:var(--accent);color:var(--accent);}
+.btn-ghost:hover{border-color:var(--accent);color:var(--accent);box-shadow:0 0 10px rgba(0,229,255,.2);}
 .btn-danger{background:transparent;border:1px solid var(--border);color:var(--muted);}
-.btn-danger:hover{border-color:#f43f5e;color:#f43f5e;}
-.overlay{position:fixed;inset:0;background:rgba(6,11,20,.88);backdrop-filter:blur(6px);z-index:500;display:flex;align-items:center;justify-content:center;}
-.modal{background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:24px;width:500px;max-width:95vw;box-shadow:0 20px 60px rgba(0,0,0,.9);}
+.btn-danger:hover{border-color:#f43f5e;color:#f43f5e;box-shadow:0 0 10px rgba(244,63,94,.25);}
+.overlay{position:fixed;inset:0;background:rgba(6,11,20,.88);backdrop-filter:blur(6px);z-index:500;display:flex;align-items:center;justify-content:center;animation:popIn .25s var(--ease);}
+.modal{background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:24px;width:500px;max-width:95vw;box-shadow:0 20px 60px rgba(0,0,0,.9);animation:popIn .3s var(--ease);}
 .modal-ttl{font-size:12px;font-weight:900;letter-spacing:3px;color:var(--accent);text-transform:uppercase;margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid var(--border);}
 .modal-tabs{display:flex;border:1px solid var(--border);border-radius:3px;overflow:hidden;margin-bottom:14px;}
 .modal-tab{flex:1;padding:7px;font-size:10px;font-weight:700;letter-spacing:2px;text-align:center;cursor:pointer;background:#060b14;color:var(--muted);transition:all .15s;border:none;font-family:'Barlow Condensed',sans-serif;}
@@ -174,12 +183,30 @@ body{background:#060b14;overflow-x:hidden;}
 .import-zone-lbl{font-size:12px;color:var(--muted);letter-spacing:1px;}
 .import-zone-sub{font-size:10px;color:#2a4060;margin-top:4px;letter-spacing:.5px;}
 .krow{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:12px;}
-.kcard{background:var(--panel);border:1px solid var(--border);border-top:2px solid;border-radius:4px;padding:11px 14px;position:relative;overflow:hidden;}
+.kcard{background:var(--panel);border:1px solid var(--border);border-top:2px solid;border-radius:4px;padding:11px 14px;position:relative;overflow:hidden;transition:transform .3s var(--ease),box-shadow .3s var(--ease),border-color .3s var(--ease);animation:fadeUp .45s var(--ease) both;}
+.kcard::after{content:"";position:absolute;inset:0;background:linear-gradient(120deg,transparent 30%,rgba(0,229,255,.06) 50%,transparent 70%);background-size:200% 100%;opacity:0;transition:opacity .4s var(--ease);pointer-events:none;}
+.kcard:hover{transform:translateY(-2px);box-shadow:0 6px 24px rgba(0,229,255,.08);}
+.kcard:hover::after{opacity:1;animation:shimmer 1.6s linear infinite;}
 .klbl{font-size:9px;letter-spacing:3px;color:var(--muted);text-transform:uppercase;margin-bottom:3px;}
 .kval{font-size:28px;font-weight:900;line-height:1;}
 .kunit{font-size:11px;font-weight:400;color:var(--muted);margin-left:2px;}
 .ksub{font-size:9px;letter-spacing:2px;margin-top:3px;}
 .kico{position:absolute;top:10px;right:10px;font-size:18px;opacity:.1;}
+.act-panel{animation:fadeUp .5s var(--ease) both;}
+.act-list{display:flex;flex-direction:column;gap:6px;max-height:360px;overflow-y:auto;padding-right:4px;}
+.act-row{display:grid;grid-template-columns:22px 68px 1fr auto;gap:10px;align-items:center;padding:8px 12px;background:#060b14;border:1px solid rgba(26,45,74,.6);border-left:2px solid;border-radius:3px;font-family:'Share Tech Mono',monospace;font-size:11px;animation:rowIn .35s var(--ease) both;transition:background .25s var(--ease),transform .25s var(--ease),border-color .25s var(--ease);}
+.act-row:hover{background:#0a1628;transform:translateX(2px);}
+.act-ico{font-size:12px;text-align:center;}
+.act-kind{font-weight:700;letter-spacing:1.5px;font-size:9px;}
+.act-msg{color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.act-time{color:var(--muted);font-size:10px;letter-spacing:.5px;white-space:nowrap;}
+.panel{transition:border-color .3s var(--ease),box-shadow .3s var(--ease);}
+.panel:hover{border-color:rgba(0,229,255,.25);}
+.pue-val{transition:color .35s var(--ease),text-shadow .35s var(--ease);}
+.pr-fg{transition:width .6s var(--ease),background .3s var(--ease),box-shadow .3s var(--ease);}
+.kv{transition:color .3s var(--ease);}
+.inp,.sel{transition:border-color .2s var(--ease),box-shadow .2s var(--ease),background .2s var(--ease);}
+.mtab,.modal-tab,.htab-btn{transition:all .2s var(--ease);}
 .credit-bar{background:var(--panel);border-top:1px solid var(--border);padding:8px 20px;display:flex;justify-content:space-between;align-items:center;font-size:10px;color:var(--muted);letter-spacing:1px;}
 .credit-bar span{color:#4a6280;}
 ::-webkit-scrollbar{width:3px;height:3px;}
@@ -208,9 +235,9 @@ const BMSIcon = () => (
 );
 
 // ── SMART CSV/PDF PARSER ──────────────────────────────────────────────────────
-function detectAndParseCSV(text: string): { hourly: typeof SAMPLE_HOURLY; daily: DayEntry[]; skipped: number } {
+function detectAndParseCSV(text: string): { hourly: HourlyData; daily: DayEntry[]; skipped: number } {
   const lines = text.trim().split(/\r?\n/).filter(l => l.trim());
-  const hourly: typeof SAMPLE_HOURLY = {};
+  const hourly: HourlyData = {};
   const daily: DayEntry[] = [];
   let skipped = 0;
 
@@ -277,8 +304,10 @@ function detectAndParseCSV(text: string): { hourly: typeof SAMPLE_HOURLY; daily:
 // ── MAIN APP ──────────────────────────────────────────────────────────────────
 export default function App() {
   const [showWelcome, setShowWelcome] = useState(true);
-  const [hourly,  setHourly]    = useState<typeof SAMPLE_HOURLY>(SAMPLE_HOURLY);
-  const [daily,   setDaily]     = useState<DayEntry[]>(SAMPLE_DAILY);
+  const [hourly,  setHourly]    = useState<HourlyData>({});
+  const [daily,   setDaily]     = useState<DayEntry[]>([]);
+  const [activity, setActivity] = useState<ActivityEntry[]>([]);
+  const [hydrated, setHydrated] = useState(false);
   const [tab,     setTab]       = useState<"monitor"|"summary">("monitor");
   const [activeHall, setHall]   = useState("A");
   const [metric,  setMetric]    = useState<"temp"|"hum"|"pue">("temp");
@@ -293,7 +322,41 @@ export default function App() {
   const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(()=>{ const t=setInterval(()=>setClock(new Date()),1000); return()=>clearInterval(t); },[]);
+
+  // ── PERSISTENCE ────────────────────────────────────────────────────────────
+  useEffect(()=>{
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (raw) {
+        const s = JSON.parse(raw);
+        if (s.hourly) setHourly(s.hourly);
+        if (Array.isArray(s.daily)) setDaily(s.daily);
+        if (Array.isArray(s.activity)) setActivity(s.activity);
+      }
+    } catch {}
+    setHydrated(true);
+  },[]);
+  useEffect(()=>{
+    if (!hydrated) return;
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ hourly, daily, activity })); } catch {}
+  },[hourly, daily, activity, hydrated]);
+
   const msg = (m:string) => { setToast(m); setTimeout(()=>setToast(""),3200); };
+  const logAct = (kind:ActivityEntry["kind"], m:string) =>
+    setActivity(prev => [{ ts:Date.now(), msg:m, kind }, ...prev].slice(0,50));
+  const relTime = (ts:number) => {
+    const s = Math.floor((Date.now()-ts)/1000);
+    if (s<60) return `${s}s ago`;
+    if (s<3600) return `${Math.floor(s/60)}m ago`;
+    if (s<86400) return `${Math.floor(s/3600)}h ago`;
+    return `${Math.floor(s/86400)}d ago`;
+  };
+  const clearAll = () => {
+    if (!confirm("Clear ALL hourly, daily, and activity data? This cannot be undone.")) return;
+    setHourly({}); setDaily([]);
+    setActivity(prev => [{ ts:Date.now(), kind:"clear" as const, msg:"All data cleared" }, ...prev].slice(0,50));
+    msg("✓ All data cleared");
+  };
 
   if (showWelcome) return <WelcomePage onEnter={() => setShowWelcome(false)} />;
 
@@ -327,6 +390,7 @@ export default function App() {
     setHourly(prev=>({...prev,[selHour]:{...(prev[selHour]||{}),[activeHall]:{temp:t,hum:hu,itLoad:it,totalPwr:tp,pue}}}));
     setHf({temp:"",hum:"",itLoad:"",totalPwr:""});
     setModal(false);
+    logAct("hourly", `Hall ${activeHall} @ ${selHour} · PUE ${pue} · IT ${it}kW`);
     msg(`✓ Hall ${activeHall} @ ${selHour} saved · PUE: ${pue}`);
   };
 
@@ -340,6 +404,7 @@ export default function App() {
     setDaily(prev=>{ const idx=prev.findIndex(d=>d.date===label); if(idx>=0){const n=[...prev];n[idx]=entry;return n;} return[...prev,entry]; });
     setDf({date:"",cooling:"",it:"",others:"",supsLoss:"",txLoss:""});
     setModal(false);
+    logAct("daily", `Daily ${label} · PUE ${pue} · ${total.toLocaleString()} kWh`);
     msg(`✓ Daily entry for ${label} saved · PUE: ${pue}`);
   };
 
@@ -387,7 +452,9 @@ export default function App() {
         if(hCount>0) parts.push(`${hCount} hourly hour-slots`);
         if(dCount>0) parts.push(`${dCount} daily entries`);
         if(parts.length===0){ msg("⚠ No valid data found — check file format"); return; }
-        msg(`✓ Imported: ${parts.join(", ")}${skipped>0?` · ${skipped} rows skipped`:""}`);
+        const summary = `Imported ${parts.join(", ")}${skipped>0?` · ${skipped} skipped`:""}`;
+        logAct("import", summary);
+        msg(`✓ ${summary}`);
       } catch(e){ msg("⚠ Could not parse file — ensure it's a valid CSV"); }
     };
     // PDF: read as text (works for text-layer PDFs exported from Sheets)
@@ -401,8 +468,6 @@ export default function App() {
     e.preventDefault(); setDrag(false);
     const f=e.dataTransfer.files[0]; if(f) handleFile(f);
   };
-
-  const aHall=HALLS.find(h=>h.id===activeHall)!;
 
   const dayAvg=(key:keyof DayEntry,dec=0)=>daily.length
     ? +(daily.reduce((s,d)=>s+((d[key] as number)||0),0)/daily.length).toFixed(dec):null;
@@ -451,6 +516,7 @@ export default function App() {
                 <button className="btn btn-ghost" style={{fontSize:10}} onClick={exportDailyCSV}>⬇ Daily CSV</button>
               </div>
               <button className="btn btn-accent" onClick={()=>setModal(true)}>+ Log Reading</button>
+              <button className="btn btn-danger" style={{fontSize:10}} onClick={clearAll} title="Clear all data">🗑</button>
               <div className="vsep"/>
               <div className="clk-blk">
                 <span className="clk-t">{clock.toLocaleTimeString("en-GB",{hour12:false})}</span>
@@ -662,6 +728,41 @@ export default function App() {
                   ))}
                 </div>
               </div>
+            </div>
+
+            {/* Activity Log */}
+            <div className="panel act-panel" style={{marginTop:12}}>
+              <div className="ptitle">
+                🗒 Activity Log
+                <span style={{marginLeft:"auto",fontFamily:"'Share Tech Mono',monospace",fontSize:10,color:"#4a6280"}}>
+                  {activity.length} {activity.length===1?"entry":"entries"}
+                </span>
+              </div>
+              {activity.length===0 ? (
+                <div style={{fontFamily:"'Share Tech Mono',monospace",fontSize:11,color:"#4a6280",padding:"20px 0",textAlign:"center"}}>
+                  No activity yet — log a reading or import a file to begin.
+                </div>
+              ) : (
+                <div className="act-list">
+                  {activity.map((a,i)=>{
+                    const c = a.kind==="hourly" ? "#00e5ff"
+                          : a.kind==="daily"  ? "#a3e635"
+                          : a.kind==="import" ? "#e879f9"
+                          : "#f43f5e";
+                    const icon = a.kind==="hourly" ? "🏢"
+                              : a.kind==="daily"  ? "📅"
+                              : a.kind==="import" ? "📂" : "🗑";
+                    return (
+                      <div key={a.ts+"-"+i} className="act-row" style={{borderLeftColor:c,animationDelay:`${Math.min(i*30,300)}ms`}}>
+                        <span className="act-ico">{icon}</span>
+                        <span className="act-kind" style={{color:c}}>{a.kind.toUpperCase()}</span>
+                        <span className="act-msg">{a.msg}</span>
+                        <span className="act-time">{relTime(a.ts)}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           </>}
         </div>
