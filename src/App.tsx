@@ -1,11 +1,12 @@
 import { useState, useEffect, useRef } from "react";
 import {
-  LineChart, Line, AreaChart, Area, BarChart, Bar,
+  AreaChart, Area, BarChart, Bar,
   XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, ReferenceLine
 } from "recharts";
 import WelcomePage from "./WelcomePage";
 import { SAMPLE_HOURLY, SAMPLE_DAILY } from "./sampleData";
+import { parseImport, type DayEntry as ImportedDayEntry, type HourlyMap } from "./utils/parseImport";
 
 // ── CONSTANTS ─────────────────────────────────────────────────────────────────
 const HALLS = [
@@ -24,12 +25,11 @@ const getTempStatus = (v:number) => v>30?"crit":v>26?"warn":"ok";
 const getHumStatus  = (v:number) => (v>70||v<30)?"warn":"ok";
 const getPueStatus  = (v:number) => v>1.83?"crit":v>1.6?"warn":"ok";
 
-function fmtDate(dt:Date){ return `${String(dt.getDate()).padStart(2,"0")} ${MONTHS[dt.getMonth()]} '${String(dt.getFullYear()).slice(2)}`; }
 function isoToLabel(iso:string){ const [y,m,d]=iso.split("-"); return `${d} ${MONTHS[parseInt(m)-1]} '${y.slice(2)}`; }
 
 // ── TYPES ─────────────────────────────────────────────────────────────────────
 interface HallEntry { temp:number; hum:number; itLoad:number; totalPwr:number; pue:number; }
-interface DayEntry  { date:string; totalUtility:number; cooling:number; it:number; others:number; supsLoss:number; txLoss:number; pue:number; }
+type DayEntry = ImportedDayEntry;
 
 // ── MINI BAR ──────────────────────────────────────────────────────────────────
 const MiniBar = ({ value, min, max, color, label, unit }:
@@ -185,6 +185,46 @@ body{background:#060b14;overflow-x:hidden;}
 ::-webkit-scrollbar{width:3px;height:3px;}
 ::-webkit-scrollbar-track{background:#060b14;}
 ::-webkit-scrollbar-thumb{background:#2a4060;border-radius:2px;}
+
+/* --- motion & polish --- */
+@keyframes fadeUp{from{opacity:0;transform:translateY(8px);}to{opacity:1;transform:translateY(0);}}
+@keyframes fadeIn{from{opacity:0;}to{opacity:1;}}
+@keyframes glow{0%,100%{filter:drop-shadow(0 0 4px currentColor);}50%{filter:drop-shadow(0 0 10px currentColor);}}
+.krow .kcard,.halls .hcard,.panel{animation:fadeUp .4s ease both;}
+.halls .hcard{transform:translateZ(0);}
+.halls .hcard:nth-child(1){animation-delay:.02s;}
+.halls .hcard:nth-child(2){animation-delay:.06s;}
+.halls .hcard:nth-child(3){animation-delay:.10s;}
+.halls .hcard:nth-child(4){animation-delay:.14s;}
+.halls .hcard:nth-child(5){animation-delay:.18s;}
+.krow .kcard:nth-child(1){animation-delay:.03s;}
+.krow .kcard:nth-child(2){animation-delay:.08s;}
+.krow .kcard:nth-child(3){animation-delay:.13s;}
+.krow .kcard:nth-child(4){animation-delay:.18s;}
+.krow .kcard:nth-child(5){animation-delay:.23s;}
+.hcard{transition:border-color .25s, box-shadow .25s, transform .2s, background .25s;}
+.hcard:hover{transform:translateY(-2px);background:rgba(0,229,255,.03);}
+.kcard{transition:transform .25s, border-color .25s, box-shadow .25s;}
+.kcard:hover{transform:translateY(-2px);box-shadow:0 8px 24px rgba(0,0,0,.5);}
+.panel{transition:border-color .25s;}
+.tab{transition:color .2s,border-color .2s;}
+.body > *{animation:fadeIn .35s ease both;}
+.pue-val{transition:color .3s, text-shadow .3s;}
+.ksub{transition:color .25s;}
+.trend-arrow{display:inline-block;font-family:'Share Tech Mono',monospace;font-size:10px;margin-left:4px;}
+.trend-arrow.up{color:#f43f5e;}
+.trend-arrow.down{color:#a3e635;}
+.trend-arrow.flat{color:#4a6280;}
+
+/* empty state */
+.empty{
+  background:var(--panel);border:1px dashed var(--border);border-radius:6px;
+  padding:48px 24px;text-align:center;color:var(--muted);
+  animation:fadeUp .4s ease both;
+}
+.empty h3{font-size:20px;letter-spacing:3px;color:var(--accent);margin-bottom:10px;font-weight:900;}
+.empty p{font-size:13px;line-height:1.6;margin-bottom:18px;}
+.empty-actions{display:flex;gap:10px;justify-content:center;flex-wrap:wrap;}
 `;
 
 // ── ICON ──────────────────────────────────────────────────────────────────────
@@ -207,78 +247,13 @@ const BMSIcon = () => (
   </svg>
 );
 
-// ── SMART CSV/PDF PARSER ──────────────────────────────────────────────────────
-function detectAndParseCSV(text: string): { hourly: typeof SAMPLE_HOURLY; daily: DayEntry[]; skipped: number } {
-  const lines = text.trim().split(/\r?\n/).filter(l => l.trim());
-  const hourly: typeof SAMPLE_HOURLY = {};
-  const daily: DayEntry[] = [];
-  let skipped = 0;
-
-  // Auto-detect format by scanning headers
-  let mode: "hourly"|"daily"|"unknown" = "unknown";
-
-  for (let i = 0; i < lines.length; i++) {
-    const raw = lines[i].trim();
-    if (!raw) continue;
-
-    // Detect section headers (flexible matching)
-    const lower = raw.toLowerCase();
-    if (lower.includes("hourly") && (lower.includes("log") || lower.includes("reading"))) { mode="hourly"; continue; }
-    if (lower.includes("daily") && (lower.includes("log") || lower.includes("energy") || lower.includes("summary"))) { mode="daily"; continue; }
-
-    const cols = raw.split(",").map(c => c.trim().replace(/^"|"$/g,""));
-
-    // Skip header rows (non-numeric first cell that isn't a time or date)
-    if (isNaN(Date.parse(cols[0])) && !/^\d{2}:\d{2}$/.test(cols[0]) && !/^\d{2}\s/.test(cols[0])) {
-      // Auto-detect mode from header columns
-      if (cols.some(c => /^hall$/i.test(c))) { mode="hourly"; continue; }
-      if (cols.some(c => /utility|cooling/i.test(c))) { mode="daily"; continue; }
-      // Unknown header — try to infer from column count
-      if (cols.length >= 8) { mode = "hourly"; }
-      else if (cols.length >= 6) { mode = "daily"; }
-      continue;
-    }
-
-    try {
-      if (mode === "hourly" || (mode === "unknown" && cols.length >= 8)) {
-        // Expected: Timestamp, Hall, Hour, Temp, Hum, IT, TotalPwr, PUE
-        const hall  = cols[1]?.toUpperCase();
-        const hour  = cols[2];
-        const temp  = parseFloat(cols[3]);
-        const hum   = parseFloat(cols[4]);
-        const it    = parseFloat(cols[5]);
-        const tp    = parseFloat(cols[6]);
-        const pue   = parseFloat(cols[7]) || +(tp/it).toFixed(2);
-        if (!HALLS.some(h=>h.id===hall) || !/^\d{2}:\d{2}$/.test(hour) || [temp,hum,it,tp].some(isNaN)) {
-          skipped++; continue;
-        }
-        if (!hourly[hour]) hourly[hour] = {} as any;
-        hourly[hour][hall] = { temp, hum, itLoad:it, totalPwr:tp, pue };
-      } else if (mode === "daily" || (mode === "unknown" && cols.length >= 7)) {
-        // Expected: Date, TotalUtility, Cooling, IT, Others, SUPSLoss, TXLoss, PUE
-        const date  = cols[0];
-        const total = parseFloat(cols[1]);
-        const cool  = parseFloat(cols[2]);
-        const it    = parseFloat(cols[3]);
-        const oth   = parseFloat(cols[4]);
-        const sups  = parseFloat(cols[5]);
-        const tx    = parseFloat(cols[6]);
-        const pue   = parseFloat(cols[7]) || +((total||it+cool+oth+sups+tx)/it).toFixed(2);
-        if ([total,cool,it,oth,sups,tx].some(isNaN)) { skipped++; continue; }
-        daily.push({ date, totalUtility:total, cooling:cool, it, others:oth, supsLoss:sups, txLoss:tx, pue });
-      } else {
-        skipped++;
-      }
-    } catch { skipped++; }
-  }
-  return { hourly, daily, skipped };
-}
+// CSV / PDF parsing lives in src/utils/parseImport.ts
 
 // ── MAIN APP ──────────────────────────────────────────────────────────────────
 export default function App() {
   const [showWelcome, setShowWelcome] = useState(true);
-  const [hourly,  setHourly]    = useState<typeof SAMPLE_HOURLY>(SAMPLE_HOURLY);
-  const [daily,   setDaily]     = useState<DayEntry[]>(SAMPLE_DAILY);
+  const [hourly,  setHourly]    = useState<HourlyMap>({});
+  const [daily,   setDaily]     = useState<DayEntry[]>([]);
   const [tab,     setTab]       = useState<"monitor"|"summary">("monitor");
   const [activeHall, setHall]   = useState("A");
   const [metric,  setMetric]    = useState<"temp"|"hum"|"pue">("temp");
@@ -295,7 +270,27 @@ export default function App() {
   useEffect(()=>{ const t=setInterval(()=>setClock(new Date()),1000); return()=>clearInterval(t); },[]);
   const msg = (m:string) => { setToast(m); setTimeout(()=>setToast(""),3200); };
 
-  if (showWelcome) return <WelcomePage onEnter={() => setShowWelcome(false)} />;
+  const loadSample = () => {
+    setHourly(SAMPLE_HOURLY);
+    setDaily(SAMPLE_DAILY);
+    msg("✓ Sample data loaded");
+  };
+  const clearAll = () => {
+    setHourly({});
+    setDaily([]);
+    msg("✓ Cleared");
+  };
+
+  if (showWelcome) return (
+    <WelcomePage
+      onEnter={() => setShowWelcome(false)}
+      onEnterWithSample={() => {
+        setHourly(SAMPLE_HOURLY);
+        setDaily(SAMPLE_DAILY);
+        setShowWelcome(false);
+      }}
+    />
+  );
 
   // ── DERIVED ────────────────────────────────────────────────────────────────
   const latestHour = [...HOURS].reverse().find(h=>hourly[h]);
@@ -306,8 +301,30 @@ export default function App() {
   const avgTemp = hallAvg("temp",1);
   const avgHum  = hallAvg("hum",1);
   const totalIT = latest ? HALLS.reduce((s,h)=>s+(latest[h.id]?.itLoad??0),0) : null;
+  const totalPwr = latest ? HALLS.reduce((s,h)=>s+(latest[h.id]?.totalPwr??0),0) : null;
   const pueStatus = avgPUE ? getPueStatus(avgPUE) : "ok";
   const pueColor  = SC[pueStatus];
+
+  // Previous-hour comparison for trend arrows
+  const sortedHours = [...HOURS].filter(h=>hourly[h]);
+  const prevHour = sortedHours.length > 1 ? sortedHours[sortedHours.length-2] : null;
+  const prev = prevHour ? hourly[prevHour] : null;
+  const prevAvg = (key:keyof HallEntry, dec=1) => prev
+    ? +(HALLS.reduce((s,h)=>s+(prev[h.id]?.[key]??0),0)/HALLS.length).toFixed(dec) : null;
+  const trend = (cur:number|null, prv:number|null): "up"|"down"|"flat"|null => {
+    if (cur==null || prv==null) return null;
+    const diff = cur - prv;
+    const eps = Math.max(0.01, Math.abs(prv) * 0.002);
+    if (diff > eps) return "up";
+    if (diff < -eps) return "down";
+    return "flat";
+  };
+  const prevPUE   = prevAvg("pue", 2);
+  const prevTemp  = prevAvg("temp", 1);
+  const prevHum   = prevAvg("hum", 1);
+  const prevIT    = prev ? HALLS.reduce((s,h)=>s+(prev[h.id]?.itLoad??0),0) : null;
+  const prevPwr   = prev ? HALLS.reduce((s,h)=>s+(prev[h.id]?.totalPwr??0),0) : null;
+  const arrow = (d: "up"|"down"|"flat"|null) => d==="up"?"▲":d==="down"?"▼":d==="flat"?"■":"";
 
   const multiData = HOURS.filter(h=>hourly[h]).map(h=>{
     const row:any = { hour:h };
@@ -369,28 +386,46 @@ export default function App() {
 
   // ── IMPORT (auto-detect CSV or PDF text) ───────────────────────────────────
   const handleFile = (file:File) => {
-    const reader=new FileReader();
-    reader.onload=ev=>{
-      const text=ev.target?.result as string;
-      if(!text?.trim()){ msg("⚠ File appears empty"); return; }
+    const reader = new FileReader();
+    reader.onload = ev => {
+      const text = ev.target?.result as string;
+      if (!text?.trim()) { msg("⚠ File appears empty"); return; }
       try {
-        const { hourly:h, daily:d, skipped } = detectAndParseCSV(text);
-        const hCount=Object.keys(h).length, dCount=d.length;
-        if(hCount>0) setHourly(prev=>({...prev,...h}));
-        if(dCount>0) setDaily(prev=>{
-          const merged=[...prev];
-          d.forEach(entry=>{ const idx=merged.findIndex(x=>x.date===entry.date);
-            if(idx>=0) merged[idx]=entry; else merged.push(entry); });
+        const res = parseImport(text);
+        const hCount = Object.keys(res.hourly).length;
+        const dCount = res.daily.length;
+
+        if (hCount > 0) setHourly(prev => {
+          const merged: HourlyMap = { ...prev };
+          for (const [hour, halls] of Object.entries(res.hourly)) {
+            merged[hour] = { ...(merged[hour] || {}), ...halls };
+          }
           return merged;
         });
-        const parts=[];
-        if(hCount>0) parts.push(`${hCount} hourly hour-slots`);
-        if(dCount>0) parts.push(`${dCount} daily entries`);
-        if(parts.length===0){ msg("⚠ No valid data found — check file format"); return; }
-        msg(`✓ Imported: ${parts.join(", ")}${skipped>0?` · ${skipped} rows skipped`:""}`);
-      } catch(e){ msg("⚠ Could not parse file — ensure it's a valid CSV"); }
+        if (dCount > 0) setDaily(prev => {
+          const merged = [...prev];
+          res.daily.forEach(entry => {
+            const idx = merged.findIndex(x => x.date === entry.date);
+            if (idx >= 0) merged[idx] = entry; else merged.push(entry);
+          });
+          return merged;
+        });
+
+        if (hCount === 0 && dCount === 0) {
+          msg(`⚠ No valid data found (${res.format}) — check file format`);
+          return;
+        }
+        const parts: string[] = [];
+        if (hCount > 0) parts.push(`${hCount} hourly slots`);
+        if (dCount > 0) parts.push(`${dCount} daily entries`);
+        const fmt = res.format === "pdf-text" ? "PDF text"
+          : res.format === "mixed" ? "mixed" : "CSV";
+        msg(`✓ Imported (${fmt}, ${file.name}): ${parts.join(", ")}${
+          res.skipped > 0 ? ` · ${res.skipped} skipped` : ""}`);
+      } catch (e) {
+        msg(`⚠ Could not parse file — ${(e as Error).message || "unknown error"}`);
+      }
     };
-    // PDF: read as text (works for text-layer PDFs exported from Sheets)
     reader.readAsText(file);
   };
 
@@ -401,8 +436,6 @@ export default function App() {
     e.preventDefault(); setDrag(false);
     const f=e.dataTransfer.files[0]; if(f) handleFile(f);
   };
-
-  const aHall=HALLS.find(h=>h.id===activeHall)!;
 
   const dayAvg=(key:keyof DayEntry,dec=0)=>daily.length
     ? +(daily.reduce((s,d)=>s+((d[key] as number)||0),0)/daily.length).toFixed(dec):null;
@@ -450,6 +483,15 @@ export default function App() {
                 <button className="btn btn-ghost" style={{fontSize:10}} onClick={exportHourlyCSV}>⬇ Hourly CSV</button>
                 <button className="btn btn-ghost" style={{fontSize:10}} onClick={exportDailyCSV}>⬇ Daily CSV</button>
               </div>
+              <div style={{position:"relative",display:"flex",gap:4}}>
+                <button className="btn btn-ghost" style={{fontSize:10}}
+                  title="Load sample dataset"
+                  onClick={loadSample}>✨ Sample</button>
+                {(Object.keys(hourly).length>0 || daily.length>0) && (
+                  <button className="btn btn-danger" style={{fontSize:10}}
+                    title="Clear all data" onClick={clearAll}>✕ Clear</button>
+                )}
+              </div>
               <button className="btn btn-accent" onClick={()=>setModal(true)}>+ Log Reading</button>
               <div className="vsep"/>
               <div className="clk-blk">
@@ -466,20 +508,37 @@ export default function App() {
         </header>
 
         <div className="body">
-          {tab==="monitor" && <>
+          {tab==="monitor" && Object.keys(hourly).length===0 && (
+            <div className="empty">
+              <h3>NO READINGS YET</h3>
+              <p>
+                Log a reading, import a CSV/PDF export, or load the sample
+                dataset to see your halls light up.
+              </p>
+              <div className="empty-actions">
+                <button className="btn btn-accent" onClick={loadSample}>✨ Load Sample Data</button>
+                <button className="btn btn-ghost" onClick={()=>fileRef.current?.click()}>⬆ Import File</button>
+                <button className="btn btn-ghost" onClick={()=>setModal(true)}>+ Log Reading</button>
+              </div>
+            </div>
+          )}
+          {tab==="monitor" && Object.keys(hourly).length>0 && <>
             {/* KPI Row */}
             <div className="krow">
               {[
-                {l:"FACILITY PUE",v:avgPUE,  u:"",   c:"#00e5ff",i:"⚡",s:avgPUE?getPueStatus(avgPUE):"ok"},
-                {l:"TOTAL IT",   v:totalIT, u:"kW", c:"#a3e635",i:"🖥",s:"ok" as const},
-                {l:"TOTAL PWR",  v:latest?HALLS.reduce((s,h)=>s+(latest[h.id]?.totalPwr??0),0):null,u:"kW",c:"#f97316",i:"🔋",s:"ok" as const},
-                {l:"AVG TEMP",   v:avgTemp, u:"°C", c:"#f97316",i:"🌡",s:avgTemp?getTempStatus(avgTemp):"ok" as const},
-                {l:"AVG HUM",    v:avgHum,  u:"%",  c:"#38bdf8",i:"💧",s:avgHum?getHumStatus(avgHum):"ok" as const},
+                {l:"FACILITY PUE",v:avgPUE,  u:"",   c:"#00e5ff",i:"⚡",s:avgPUE?getPueStatus(avgPUE):"ok",  t:trend(avgPUE,  prevPUE)},
+                {l:"TOTAL IT",   v:totalIT, u:"kW", c:"#a3e635",i:"🖥",s:"ok" as const,                     t:trend(totalIT, prevIT)},
+                {l:"TOTAL PWR",  v:totalPwr,u:"kW", c:"#f97316",i:"🔋",s:"ok" as const,                     t:trend(totalPwr,prevPwr)},
+                {l:"AVG TEMP",   v:avgTemp, u:"°C", c:"#f97316",i:"🌡",s:avgTemp?getTempStatus(avgTemp):"ok" as const, t:trend(avgTemp, prevTemp)},
+                {l:"AVG HUM",    v:avgHum,  u:"%",  c:"#38bdf8",i:"💧",s:avgHum?getHumStatus(avgHum):"ok" as const,   t:trend(avgHum,  prevHum)},
               ].map((k,i)=>(
                 <div key={i} className="kcard" style={{borderTopColor:k.c}}>
                   <div className="kico">{k.i}</div>
                   <div className="klbl">{k.l}</div>
-                  <div className="kval" style={{color:k.c}}>{k.v??'—'}<span className="kunit">{k.u}</span></div>
+                  <div className="kval" style={{color:k.c}}>
+                    {k.v??'—'}<span className="kunit">{k.u}</span>
+                    {k.t && <span className={`trend-arrow ${k.t}`}>{arrow(k.t)}</span>}
+                  </div>
                   <div className="ksub" style={{color:SC[k.s as keyof typeof SC]}}>● {k.s.toUpperCase()}</div>
                 </div>
               ))}
@@ -557,21 +616,33 @@ export default function App() {
                   ))}
                 </div>
               </div>
-              <ResponsiveContainer width="100%" height={210}>
-                <LineChart data={multiData} margin={{top:4,right:10,left:-20,bottom:0}}>
+              <ResponsiveContainer width="100%" height={230}>
+                <AreaChart data={multiData} margin={{top:4,right:10,left:-20,bottom:0}}>
+                  <defs>
+                    {HALLS.map(h => (
+                      <linearGradient key={h.id} id={`mh-g-${h.id}`} x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%"  stopColor={h.color} stopOpacity={activeHall===h.id?0.35:0.08}/>
+                        <stop offset="95%" stopColor={h.color} stopOpacity={0}/>
+                      </linearGradient>
+                    ))}
+                  </defs>
                   <CartesianGrid strokeDasharray="3 3" stroke="#1a2d4a"/>
                   <XAxis dataKey="hour" tick={{fill:"#4a6280",fontSize:9,fontFamily:"Share Tech Mono"}}/>
                   <YAxis tick={{fill:"#4a6280",fontSize:9,fontFamily:"Share Tech Mono"}}/>
                   <Tooltip content={<CTip/>}/>
-                  {metric==="temp"&&<ReferenceLine y={26}   stroke="#facc15" strokeDasharray="5 4" strokeWidth={1}/>}
-                  {metric==="hum" &&<ReferenceLine y={60}   stroke="#facc15" strokeDasharray="5 4" strokeWidth={1}/>}
-                  {metric==="pue" &&<ReferenceLine y={1.83} stroke="#facc15" strokeDasharray="5 4" strokeWidth={1}/>}
+                  {metric==="temp"&&<ReferenceLine y={26}   stroke="#facc15" strokeDasharray="5 4" strokeWidth={1} label={{value:"26°C",fill:"#facc15",fontSize:9}}/>}
+                  {metric==="hum" &&<ReferenceLine y={60}   stroke="#facc15" strokeDasharray="5 4" strokeWidth={1} label={{value:"60%", fill:"#facc15",fontSize:9}}/>}
+                  {metric==="pue" &&<ReferenceLine y={1.83} stroke="#facc15" strokeDasharray="5 4" strokeWidth={1} label={{value:"1.83",fill:"#facc15",fontSize:9}}/>}
                   {HALLS.map(h=>(
-                    <Line key={h.id} type="monotone" dataKey={h.id} name={`Hall ${h.id}`}
-                      stroke={h.color} strokeWidth={2} dot={false}
+                    <Area key={h.id} type="monotone" dataKey={h.id} name={`Hall ${h.id}`}
+                      stroke={h.color}
+                      strokeWidth={activeHall===h.id?2.6:1.6}
+                      strokeOpacity={activeHall===h.id?1:0.55}
+                      fill={`url(#mh-g-${h.id})`}
+                      isAnimationActive animationDuration={500}
                       activeDot={{r:4,fill:h.color,stroke:"#060b14",strokeWidth:1.5}}/>
                   ))}
-                </LineChart>
+                </AreaChart>
               </ResponsiveContainer>
               <div className="chart-legend">
                 {HALLS.map(h=>(<span key={h.id} style={{color:h.color}}>─ HALL {h.id}</span>))}
@@ -580,7 +651,21 @@ export default function App() {
             </div>
           </>}
 
-          {tab==="summary" && <>
+          {tab==="summary" && daily.length===0 && (
+            <div className="empty">
+              <h3>NO DAILY ENTRIES YET</h3>
+              <p>
+                Log a daily summary, import a CSV/PDF report, or load the sample
+                dataset to see 5-day trends.
+              </p>
+              <div className="empty-actions">
+                <button className="btn btn-accent" onClick={loadSample}>✨ Load Sample Data</button>
+                <button className="btn btn-ghost" onClick={()=>fileRef.current?.click()}>⬆ Import File</button>
+                <button className="btn btn-ghost" onClick={()=>{setModalTab("daily");setModal(true);}}>+ Log Daily</button>
+              </div>
+            </div>
+          )}
+          {tab==="summary" && daily.length>0 && <>
             <div className="panel" style={{marginBottom:12}}>
               <div className="ptitle">📋 Energy Summary</div>
               <div className="tbl-wrap">

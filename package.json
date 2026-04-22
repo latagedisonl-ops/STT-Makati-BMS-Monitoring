@@ -4,9 +4,11 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "vite build",
-    "preview": "vite preview"
+    "dev": "node ./node_modules/vite/bin/vite.js",
+    "build": "node ./node_modules/vite/bin/vite.js build",
+    "preview": "node ./node_modules/vite/bin/vite.js preview",
+    "server": "nodemon --exec tsx server/index.ts",
+    "server:prod": "tsx server/index.ts"
   },
   "dependencies": {
     "clsx": "2.1.1",
@@ -35,14 +37,5 @@
     "typescript": "5.9.3",
     "vite": "7.2.4",
     "vite-plugin-singlefile": "2.3.0"
-  },
-  "scripts": {
-    "dev": "vite",
-    "build": "vite build",
-    "preview": "vite preview",
-    "server": "nodemon --exec tsx server/index.ts",
-    "server:prod": "tsx server/index.ts"
   }
 }
-
-
